@@ -463,7 +463,7 @@ body:not(.ready) .shell{display:none}
 </style>
 </head>
 <body>
-<div id="gate" hidden><form id="gf"><div class="glogo">__GATE_LOGO__</div><h2>Ek Satış Takip Paneli</h2><p>Servis Performans Yönetimi · görüntülemek için giriş yapın</p>
+<div id="gate" hidden><form id="gf"><div class="glogo">__GATE_LOGO__</div><h2>Ek Satış Takip Paneli</h2><p>Servis Performans Yönetimi</p>
  <input id="gm" type="text" placeholder="Kullanıcı adı" autocapitalize="none" spellcheck="false" autocomplete="username" autofocus><input id="gp" type="password" placeholder="Şifre" autocomplete="current-password"><button class="pri" type="submit">Giriş</button><div class="gerr" id="ge"></div></form></div>
 <div class="shell">
 <header class="top"><div class="in">
