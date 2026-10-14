@@ -11,7 +11,8 @@ Excel'i (ek_satis.xlsx) yeniledikten sonra bu scripti çalıştırmanız yeterli
 Kaynak : Excel'deki 'Konsolide Hedef' sayfası (marka bloklarındaki Plan / Fiili sütunları)
 Çıktı  : index.html  (tek dosya; veri ve "Excel indir" dosyası içine gömülü)  <- GitHub'a yüklenen dosya bu
          ek_satis_takip.xlsx  (aynı Excel'in yerel kopyası, GitHub'a yüklenmez)
-Şifre  : sifre.txt dosyasına (ilk satır) şifre yazarsanız veri şifrelenir (pip install cryptography gerekir)
+Kullanıcı: kullanicilar.txt (mail;sifre) varsa veri kişi bazlı şifrelenir.
+Şifre  : (eski yöntem) sifre.txt dosyasına (ilk satır) şifre yazarsanız veri şifrelenir (pip install cryptography gerekir)
 
 Not: Büyük 'Fatura Detay Liste' sayfası hiç okunmaz, bu yüzden birkaç saniyede biter.
 Yeni bir ay için 'Fiili' sütunu eklendiğinde (örn. Kasım) otomatik algılanır.
@@ -462,8 +463,8 @@ body:not(.ready) .shell{display:none}
 </style>
 </head>
 <body>
-<div id="gate" hidden><form id="gf"><div class="glogo">__GATE_LOGO__</div><h2>Ek Satış Takip Paneli</h2><p>Servis Performans Yönetimi · görüntülemek için şifreyi girin</p>
- <input id="gp" type="password" placeholder="Şifre" autocomplete="current-password" autofocus><button class="pri" type="submit">Giriş</button><div class="gerr" id="ge"></div></form></div>
+<div id="gate" hidden><form id="gf"><div class="glogo">__GATE_LOGO__</div><h2>Ek Satış Takip Paneli</h2><p>Servis Performans Yönetimi · görüntülemek için giriş yapın</p>
+ <input id="gm" type="text" placeholder="Kullanıcı adı" autocapitalize="none" spellcheck="false" autocomplete="username" autofocus><input id="gp" type="password" placeholder="Şifre" autocomplete="current-password"><button class="pri" type="submit">Giriş</button><div class="gerr" id="ge"></div></form></div>
 <div class="shell">
 <header class="top"><div class="in">
  <div class="logo" id="logo"></div>
@@ -704,22 +705,34 @@ document.body.classList.add('ready');
   if (PAYLOAD.plain) { start(PAYLOAD.plain); return; }
   const enc = PAYLOAD.enc, gate = document.getElementById('gate'), err = document.getElementById('ge');
   const b64 = x => Uint8Array.from(atob(x), c => c.charCodeAt(0));
-  async function decrypt(pw) {
-    const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
-    const key = await crypto.subtle.deriveKey({name: 'PBKDF2', salt: b64(enc.salt), iterations: enc.iter, hash: 'SHA-256'}, km, {name: 'AES-GCM', length: 256}, false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: b64(enc.iv)}, key, b64(enc.ct));
-    return JSON.parse(new TextDecoder().decode(pt));
+  const te = new TextEncoder();
+  async function aes(keyBytes, iv, ct) {
+    const k = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({name: 'AES-GCM', iv: b64(iv)}, k, b64(ct)));
   }
-  async function attempt(pw, silent) {
+  async function pbk(secret, salt, iter) {
+    const km = await crypto.subtle.importKey('raw', te.encode(secret), 'PBKDF2', false, ['deriveBits']);
+    return new Uint8Array(await crypto.subtle.deriveBits({name: 'PBKDF2', salt: b64(salt), iterations: iter, hash: 'SHA-256'}, km, 256));
+  }
+  async function decrypt(mail, pw) {
+    mail = mail.trim().toLowerCase();
+    const idb = await crypto.subtle.digest('SHA-256', te.encode(enc.pep + mail));
+    const id = Array.from(new Uint8Array(idb)).slice(0, 8).map(x => x.toString(16).padStart(2, '0')).join('');
+    const u = enc.users.find(x => x.id === id);
+    if (!u) throw new Error('yok');
+    const dk = await aes(await pbk(mail + ':' + pw, u.salt, enc.iter), u.iv, u.ct);
+    return JSON.parse(new TextDecoder().decode(await aes(dk, enc.iv, enc.ct)));
+  }
+  async function attempt(mail, pw, silent) {
     try {
-      const d = await decrypt(pw);
-      try { sessionStorage.setItem('eks_pw', pw); } catch (e) {}
+      const d = await decrypt(mail, pw);
+      try { sessionStorage.setItem('eks_c', JSON.stringify([mail, pw])); } catch (e) {}
       gate.hidden = true; start(d);
-    } catch (e) { if (!silent) { err.textContent = 'Şifre hatalı. Lütfen tekrar deneyin.'; } }
+    } catch (e) { if (!silent) { err.textContent = 'Kullanıcı adı veya şifre hatalı. Lütfen tekrar deneyin.'; } }
   }
   gate.hidden = false;
-  document.getElementById('gf').addEventListener('submit', e => { e.preventDefault(); err.textContent = ''; attempt(document.getElementById('gp').value, false); });
-  try { const sp = sessionStorage.getItem('eks_pw'); if (sp) attempt(sp, true); } catch (e) {}
+  document.getElementById('gf').addEventListener('submit', e => { e.preventDefault(); err.textContent = ''; attempt(document.getElementById('gm').value, document.getElementById('gp').value, false); });
+  try { const sp = JSON.parse(sessionStorage.getItem('eks_c') || 'null'); if (sp) attempt(sp[0], sp[1], true); } catch (e) {}
 })();
 </script>
 </body>
@@ -746,31 +759,65 @@ def load_logo(folder, explicit=None):
 PBKDF2_ITER = 200_000
 
 
-def make_payload(data, password):
-    """Şifre verilmişse veriyi AES-GCM ile şifreler; HTML içinde yalnızca şifreli metin kalır."""
-    if not password:
+def read_users(here):
+    """kullanicilar.txt: her satır 'mail' ya da 'mail;sifre'. Şifresi olmayana otomatik şifre üretilip dosyaya yazılır."""
+    p = os.path.join(here, "kullanicilar.txt")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8-sig") as fh:
+            raw = [l.strip() for l in fh if l.strip() and not l.strip().startswith("#")]
+        users, lines, changed = {}, [], False
+        for l in raw:
+            mail, _, pw = l.partition(";")
+            mail, pw = mail.strip().lower(), pw.strip()
+            if not mail:
+                sys.exit(f"HATA: kullanicilar.txt içinde boş kullanıcı adı: {l}")
+            if not pw:
+                pw, changed = gen_password(), True
+            users[mail] = pw
+            lines.append(f"{mail};{pw}")
+        if changed:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("# mail;sifre   (bu dosya GitHub'a YÜKLENMEZ; sifreleri ilgili kisilere iletin)\n" + "\n".join(lines) + "\n")
+            print("Yeni şifreler kullanicilar.txt dosyasına yazıldı.")
+        return users
+    return None
+
+
+def gen_password():
+    import secrets
+    al = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "-".join("".join(secrets.choice(al) for _ in range(4)) for _ in range(3))
+
+
+def make_payload(data, users):
+    """users {mail: sifre} verilmişse veri rastgele bir anahtarla AES-GCM ile şifrelenir;
+    anahtar her kullanıcının mail+şifresinden türetilen anahtarla ayrı ayrı sarılır."""
+    if not users:
         return {"plain": data}
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
         sys.exit("HATA: Şifreli çıktı için bir kez şunu çalıştırın:  pip install cryptography")
-    salt, iv = os.urandom(16), os.urandom(12)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITER, 32)
-    ct = AESGCM(key).encrypt(iv, json.dumps(data, ensure_ascii=False).encode("utf-8"), None)
     b = lambda x: base64.b64encode(x).decode()
-    return {"enc": {"salt": b(salt), "iv": b(iv), "ct": b(ct), "iter": PBKDF2_ITER}}
+    dk, iv, pep = os.urandom(32), os.urandom(12), b(os.urandom(12))
+    ct = AESGCM(dk).encrypt(iv, json.dumps(data, ensure_ascii=False).encode("utf-8"), None)
+    out = []
+    for mail, pw in users.items():
+        salt, uiv = os.urandom(16), os.urandom(12)
+        k = hashlib.pbkdf2_hmac("sha256", (mail + ":" + pw).encode("utf-8"), salt, PBKDF2_ITER, 32)
+        uid = hashlib.sha256((pep + mail).encode("utf-8")).hexdigest()[:16]
+        out.append({"id": uid, "salt": b(salt), "iv": b(uiv), "ct": b(AESGCM(k).encrypt(uiv, dk, None))})
+    return {"enc": {"pep": pep, "iv": b(iv), "ct": b(ct), "iter": PBKDF2_ITER, "users": out}}
 
 
 def read_password(here, explicit):
-    if explicit:
-        return explicit
-    if os.environ.get("EK_SATIS_SIFRE"):
-        return os.environ["EK_SATIS_SIFRE"]
+    """Eski tek-şifre yöntemi: tek kullanıcı gibi davranır (mail: genel@panel)."""
+    pw = explicit or os.environ.get("EK_SATIS_SIFRE")
     p = os.path.join(here, "sifre.txt")
-    if os.path.exists(p):
+    if not pw and os.path.exists(p):
         with open(p, encoding="utf-8-sig") as fh:
-            return fh.readline().strip() or None
-    return None
+            pw = fh.readline().strip() or None
+    return {"genel@panel": pw} if pw else None
 
 
 def main():
@@ -794,13 +841,13 @@ def main():
     write_xlsx(data, xlsx_path)
     with open(xlsx_path, "rb") as fh:
         data["xlsx"] = base64.b64encode(fh.read()).decode()
-    pw = read_password(here, a.sifre)
+    pw = read_users(here) or read_password(here, a.sifre)
     out_html = os.path.join(a.cikti, "index.html")
     with open(out_html, "w", encoding="utf-8") as f:
         f.write(HTML.replace("__PAYLOAD__", json.dumps(make_payload(data, pw), ensure_ascii=False))
                 .replace("__GATE_LOGO__", data["meta"]["logo"]))
     print(f"Hazır: {out_html}  ({data['meta']['donem']}, veri tarihi {data['meta']['veriTarihi']}, "
-          f"{len(data['brands'])} marka, {'ŞİFRELİ' if pw else 'şifresiz'})")
+          f"{len(data['brands'])} marka, {f'ŞİFRELİ, {len(pw)} kullanıcı' if pw else 'şifresiz'})")
 
 
 if __name__ == "__main__":
